@@ -964,6 +964,8 @@ sub export_gcode {
         Slic3r::GUI::catch_error($self) and return;
     }
     
+    push @{$config->{config_files}},"sample file";
+    
     # select output file
     if ($output_file) {
         $self->{export_gcode_output_file} = $self->{print}->expanded_output_filepath($output_file);
