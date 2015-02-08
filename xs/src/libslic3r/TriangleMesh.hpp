@@ -5,6 +5,7 @@
 #include <admesh/stl.h>
 #include <vector>
 #include "BoundingBox.hpp"
+#include "Line.hpp"
 #include "Point.hpp"
 #include "Polygon.hpp"
 #include "ExPolygon.hpp"
@@ -41,9 +42,8 @@ class TriangleMesh
     void rotate(double angle, Point* center);
     TriangleMeshPtrs split() const;
     void merge(const TriangleMesh &mesh);
-    void horizontal_projection(ExPolygons &retval) const;
-    void convex_hull(Polygon* hull);
-    void bounding_box(BoundingBoxf3* bb) const;
+    ExPolygons horizontal_projection() const;
+    Polygon convex_hull();
     BoundingBoxf3 bounding_box() const;
     void reset_repair_stats();
     bool needed_repair() const;
@@ -71,11 +71,9 @@ class IntersectionPoint : public Point
     IntersectionPoint() : point_id(-1), edge_id(-1) {};
 };
 
-class IntersectionLine
+class IntersectionLine : public Line
 {
     public:
-    Point           a;
-    Point           b;
     int             a_id;
     int             b_id;
     int             edge_a_id;

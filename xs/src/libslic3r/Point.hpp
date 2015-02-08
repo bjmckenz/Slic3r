@@ -9,6 +9,7 @@
 namespace Slic3r {
 
 class Line;
+class Linef;
 class MultiPoint;
 class Point;
 class Pointf;
@@ -45,9 +46,12 @@ class Point
     int nearest_point_index(const Points &points) const;
     int nearest_point_index(const PointConstPtrs &points) const;
     int nearest_point_index(const PointPtrs &points) const;
+    size_t nearest_waypoint_index(const Points &points, const Point &point) const;
     bool nearest_point(const Points &points, Point* point) const;
+    bool nearest_waypoint(const Points &points, const Point &dest, Point* point) const;
     double distance_to(const Point &point) const;
     double distance_to(const Line &line) const;
+    double perp_distance_to(const Line &line) const;
     double ccw(const Point &p1, const Point &p2) const;
     double ccw(const Line &line) const;
     double ccw_angle(const Point &p1, const Point &p2) const;
@@ -79,6 +83,12 @@ class Pointf
     coordf_t x;
     coordf_t y;
     explicit Pointf(coordf_t _x = 0, coordf_t _y = 0): x(_x), y(_y) {};
+    static Pointf new_unscale(coord_t x, coord_t y) {
+        return Pointf(unscale(x), unscale(y));
+    };
+    static Pointf new_unscale(const Point &p) {
+        return Pointf(unscale(p.x), unscale(p.y));
+    };
     void scale(double factor);
     void translate(double x, double y);
     void rotate(double angle, const Pointf &center);
@@ -97,6 +107,9 @@ class Pointf3 : public Pointf
     public:
     coordf_t z;
     explicit Pointf3(coordf_t _x = 0, coordf_t _y = 0, coordf_t _z = 0): Pointf(_x, _y), z(_z) {};
+    static Pointf3 new_unscale(coord_t x, coord_t y, coord_t z) {
+        return Pointf3(unscale(x), unscale(y), unscale(z));
+    };
     void scale(double factor);
     void translate(const Vectorf3 &vector);
     void translate(double x, double y, double z);

@@ -76,10 +76,28 @@ MultiPoint::find_point(const Point &point) const
     return -1;  // not found
 }
 
-void
-MultiPoint::bounding_box(BoundingBox* bb) const
+bool
+MultiPoint::has_boundary_point(const Point &point) const
 {
-    *bb = BoundingBox(this->points);
+    double dist = point.distance_to(point.projection_onto(*this));
+    return dist < SCALED_EPSILON;
+}
+
+BoundingBox
+MultiPoint::bounding_box() const
+{
+    return BoundingBox(this->points);
+}
+
+void
+MultiPoint::remove_duplicate_points()
+{
+    for (size_t i = 1; i < this->points.size(); ++i) {
+        if (this->points.at(i).coincides_with(this->points.at(i-1))) {
+            this->points.erase(this->points.begin() + i);
+            --i;
+        }
+    }
 }
 
 Points
@@ -90,6 +108,7 @@ MultiPoint::_douglas_peucker(const Points &points, const double tolerance)
     size_t index = 0;
     Line full(points.front(), points.back());
     for (Points::const_iterator it = points.begin() + 1; it != points.end(); ++it) {
+        // we use shortest distance, not perpendicular distance
         double d = it->distance_to(full);
         if (d > dmax) {
             index = it - points.begin();

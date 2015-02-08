@@ -35,11 +35,15 @@ enum ExtrusionLoopRole {
 class ExtrusionEntity
 {
     public:
+    virtual bool is_loop() const {
+        return false;
+    };
     virtual ExtrusionEntity* clone() const = 0;
     virtual ~ExtrusionEntity() {};
     virtual void reverse() = 0;
     virtual Point first_point() const = 0;
     virtual Point last_point() const = 0;
+    virtual Polygons grow() const = 0;
 };
 
 typedef std::vector<ExtrusionEntity*> ExtrusionEntitiesPtr;
@@ -70,6 +74,7 @@ class ExtrusionPath : public ExtrusionEntity
     std::string gcode(Extruder* extruder, double e, double F,
         double xofs, double yofs, std::string extrusion_axis,
         std::string gcode_line_suffix) const;
+    Polygons grow() const;
 
     private:
     void _inflate_collection(const Polylines &polylines, ExtrusionEntityCollection* collection) const;
@@ -84,14 +89,16 @@ class ExtrusionLoop : public ExtrusionEntity
     ExtrusionLoopRole role;
     
     ExtrusionLoop(ExtrusionLoopRole role = elrDefault) : role(role) {};
-    operator Polygon() const;
+    bool is_loop() const {
+        return true;
+    };
     ExtrusionLoop* clone() const;
     bool make_clockwise();
     bool make_counter_clockwise();
     void reverse();
     Point first_point() const;
     Point last_point() const;
-    void polygon(Polygon* polygon) const;
+    Polygon polygon() const;
     double length() const;
     bool split_at_vertex(const Point &point);
     void split_at(const Point &point);
@@ -100,6 +107,7 @@ class ExtrusionLoop : public ExtrusionEntity
     bool is_perimeter() const;
     bool is_infill() const;
     bool is_solid_infill() const;
+    Polygons grow() const;
 };
 
 }

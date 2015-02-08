@@ -133,6 +133,7 @@ class PrintObjectConfig : public virtual StaticPrintConfig
     ConfigOptionEnum<SeamPosition>  seam_position;
     ConfigOptionBool                support_material;
     ConfigOptionInt                 support_material_angle;
+    ConfigOptionFloat               support_material_contact_distance;
     ConfigOptionInt                 support_material_enforce_layers;
     ConfigOptionInt                 support_material_extruder;
     ConfigOptionFloatOrPercent      support_material_extrusion_width;
@@ -159,6 +160,7 @@ class PrintObjectConfig : public virtual StaticPrintConfig
         this->seam_position.value                                = spAligned;
         this->support_material.value                             = false;
         this->support_material_angle.value                       = 0;
+        this->support_material_contact_distance.value            = 0.2;
         this->support_material_enforce_layers.value              = 0;
         this->support_material_extruder.value                    = 1;
         this->support_material_extrusion_width.value             = 0;
@@ -186,6 +188,7 @@ class PrintObjectConfig : public virtual StaticPrintConfig
         if (opt_key == "seam_position")                              return &this->seam_position;
         if (opt_key == "support_material")                           return &this->support_material;
         if (opt_key == "support_material_angle")                     return &this->support_material_angle;
+        if (opt_key == "support_material_contact_distance")          return &this->support_material_contact_distance;
         if (opt_key == "support_material_enforce_layers")            return &this->support_material_enforce_layers;
         if (opt_key == "support_material_extruder")                  return &this->support_material_extruder;
         if (opt_key == "support_material_extrusion_width")           return &this->support_material_extrusion_width;
@@ -221,6 +224,7 @@ class PrintRegionConfig : public virtual StaticPrintConfig
     ConfigOptionInt                 infill_extruder;
     ConfigOptionFloatOrPercent      infill_extrusion_width;
     ConfigOptionInt                 infill_every_layers;
+    ConfigOptionFloatOrPercent      infill_overlap;
     ConfigOptionFloat               infill_speed;
     ConfigOptionBool                overhangs;
     ConfigOptionInt                 perimeter_extruder;
@@ -245,38 +249,40 @@ class PrintRegionConfig : public virtual StaticPrintConfig
         this->external_fill_pattern.value                        = ipRectilinear;
         this->external_perimeter_extrusion_width.value           = 0;
         this->external_perimeter_extrusion_width.percent         = false;
-        this->external_perimeter_speed.value                     = 70;
+        this->external_perimeter_speed.value                     = 50;
         this->external_perimeter_speed.percent                   = true;
         this->external_perimeters_first.value                    = false;
         this->extra_perimeters.value                             = true;
         this->fill_angle.value                                   = 45;
-        this->fill_density.value                                 = 40;
+        this->fill_density.value                                 = 20;
         this->fill_pattern.value                                 = ipHoneycomb;
         this->gap_fill_speed.value                               = 20;
         this->infill_extruder.value                              = 1;
         this->infill_extrusion_width.value                       = 0;
         this->infill_extrusion_width.percent                     = false;
         this->infill_every_layers.value                          = 1;
-        this->infill_speed.value                                 = 60;
+        this->infill_overlap.value                               = 15;
+        this->infill_overlap.percent                             = true;
+        this->infill_speed.value                                 = 80;
         this->overhangs.value                                    = true;
         this->perimeter_extruder.value                           = 1;
         this->perimeter_extrusion_width.value                    = 0;
         this->perimeter_extrusion_width.percent                  = false;
-        this->perimeter_speed.value                              = 30;
+        this->perimeter_speed.value                              = 60;
         this->perimeters.value                                   = 3;
         this->solid_infill_extruder.value                        = 1;
-        this->small_perimeter_speed.value                        = 30;
+        this->small_perimeter_speed.value                        = 15;
         this->small_perimeter_speed.percent                      = false;
         this->solid_infill_below_area.value                      = 70;
         this->solid_infill_extrusion_width.value                 = 0;
         this->solid_infill_extrusion_width.percent               = false;
         this->solid_infill_every_layers.value                    = 0;
-        this->solid_infill_speed.value                           = 60;
+        this->solid_infill_speed.value                           = 20;
         this->solid_infill_speed.percent                         = false;
         this->thin_walls.value                                   = true;
         this->top_infill_extrusion_width.value                   = 0;
         this->top_infill_extrusion_width.percent                 = false;
-        this->top_solid_infill_speed.value                       = 50;
+        this->top_solid_infill_speed.value                       = 15;
         this->top_solid_infill_speed.percent                     = false;
         this->top_solid_layers.value                             = 3;
     };
@@ -297,6 +303,7 @@ class PrintRegionConfig : public virtual StaticPrintConfig
         if (opt_key == "infill_extruder")                            return &this->infill_extruder;
         if (opt_key == "infill_extrusion_width")                     return &this->infill_extrusion_width;
         if (opt_key == "infill_every_layers")                        return &this->infill_every_layers;
+        if (opt_key == "infill_overlap")                             return &this->infill_overlap;
         if (opt_key == "infill_speed")                               return &this->infill_speed;
         if (opt_key == "overhangs")                                  return &this->overhangs;
         if (opt_key == "perimeter_extruder")                         return &this->perimeter_extruder;
@@ -321,11 +328,14 @@ class PrintRegionConfig : public virtual StaticPrintConfig
 class GCodeConfig : public virtual StaticPrintConfig
 {
     public:
+    ConfigOptionString              before_layer_gcode;
+    ConfigOptionString              end_gcode;
     ConfigOptionString              extrusion_axis;
     ConfigOptionFloats              extrusion_multiplier;
     ConfigOptionFloats              filament_diameter;
     ConfigOptionBool                gcode_comments;
     ConfigOptionEnum<GCodeFlavor>   gcode_flavor;
+    ConfigOptionString              layer_gcode;
     ConfigOptionFloat               pressure_advance;
     ConfigOptionFloats              retract_length;
     ConfigOptionFloats              retract_length_toolchange;
@@ -333,11 +343,16 @@ class GCodeConfig : public virtual StaticPrintConfig
     ConfigOptionFloats              retract_restart_extra;
     ConfigOptionFloats              retract_restart_extra_toolchange;
     ConfigOptionInts                retract_speed;
+    ConfigOptionString              start_gcode;
+    ConfigOptionString              toolchange_gcode;
     ConfigOptionFloat               travel_speed;
     ConfigOptionBool                use_firmware_retraction;
     ConfigOptionBool                use_relative_e_distances;
+    ConfigOptionBool                use_volumetric_e;
     
     GCodeConfig() : StaticPrintConfig() {
+        this->before_layer_gcode.value                           = "";
+        this->end_gcode.value                                    = "M104 S0 ; turn off temperature\nG28 X0  ; home X axis\nM84     ; disable motors\n";
         this->extrusion_axis.value                               = "E";
         this->extrusion_multiplier.values.resize(1);
         this->extrusion_multiplier.values[0]                     = 1;
@@ -345,9 +360,10 @@ class GCodeConfig : public virtual StaticPrintConfig
         this->filament_diameter.values[0]                        = 3;
         this->gcode_comments.value                               = false;
         this->gcode_flavor.value                                 = gcfRepRap;
+        this->layer_gcode.value                                  = "";
         this->pressure_advance.value                             = 0;
         this->retract_length.values.resize(1);
-        this->retract_length.values[0]                           = 1;
+        this->retract_length.values[0]                           = 2;
         this->retract_length_toolchange.values.resize(1);
         this->retract_length_toolchange.values[0]                = 10;
         this->retract_lift.values.resize(1);
@@ -357,18 +373,24 @@ class GCodeConfig : public virtual StaticPrintConfig
         this->retract_restart_extra_toolchange.values.resize(1);
         this->retract_restart_extra_toolchange.values[0]         = 0;
         this->retract_speed.values.resize(1);
-        this->retract_speed.values[0]                            = 30;
+        this->retract_speed.values[0]                            = 40;
+        this->start_gcode.value                                  = "G28 ; home all axes\nG1 Z5 F5000 ; lift nozzle\n";
+        this->toolchange_gcode.value                             = "";
         this->travel_speed.value                                 = 130;
         this->use_firmware_retraction.value                      = false;
         this->use_relative_e_distances.value                     = false;
+        this->use_volumetric_e.value                             = false;
     };
     
     ConfigOption* option(const t_config_option_key opt_key, bool create = false) {
+        if (opt_key == "before_layer_gcode")                         return &this->before_layer_gcode;
+        if (opt_key == "end_gcode")                                  return &this->end_gcode;
         if (opt_key == "extrusion_axis")                             return &this->extrusion_axis;
         if (opt_key == "extrusion_multiplier")                       return &this->extrusion_multiplier;
         if (opt_key == "filament_diameter")                          return &this->filament_diameter;
         if (opt_key == "gcode_comments")                             return &this->gcode_comments;
         if (opt_key == "gcode_flavor")                               return &this->gcode_flavor;
+        if (opt_key == "layer_gcode")                                return &this->layer_gcode;
         if (opt_key == "pressure_advance")                           return &this->pressure_advance;
         if (opt_key == "retract_length")                             return &this->retract_length;
         if (opt_key == "retract_length_toolchange")                  return &this->retract_length_toolchange;
@@ -376,9 +398,12 @@ class GCodeConfig : public virtual StaticPrintConfig
         if (opt_key == "retract_restart_extra")                      return &this->retract_restart_extra;
         if (opt_key == "retract_restart_extra_toolchange")           return &this->retract_restart_extra_toolchange;
         if (opt_key == "retract_speed")                              return &this->retract_speed;
+        if (opt_key == "start_gcode")                                return &this->start_gcode;
+        if (opt_key == "toolchange_gcode")                           return &this->toolchange_gcode;
         if (opt_key == "travel_speed")                               return &this->travel_speed;
         if (opt_key == "use_firmware_retraction")                    return &this->use_firmware_retraction;
         if (opt_key == "use_relative_e_distances")                   return &this->use_relative_e_distances;
+        if (opt_key == "use_volumetric_e")                           return &this->use_volumetric_e;
         
         return NULL;
     };
@@ -409,7 +434,6 @@ class PrintConfig : public GCodeConfig
     ConfigOptionFloat               default_acceleration;
     ConfigOptionInt                 disable_fan_first_layers;
     ConfigOptionFloat               duplicate_distance;
-    ConfigOptionString              end_gcode;
     ConfigOptionFloat               extruder_clearance_height;
     ConfigOptionFloat               extruder_clearance_radius;
     ConfigOptionPoints              extruder_offset;
@@ -423,7 +447,6 @@ class PrintConfig : public GCodeConfig
     ConfigOptionBool                gcode_arcs;
     ConfigOptionFloat               infill_acceleration;
     ConfigOptionBool                infill_first;
-    ConfigOptionString              layer_gcode;
     ConfigOptionInt                 max_fan_speed;
     ConfigOptionInt                 min_fan_speed;
     ConfigOptionInt                 min_print_speed;
@@ -444,10 +467,8 @@ class PrintConfig : public GCodeConfig
     ConfigOptionInt                 slowdown_below_layer_time;
     ConfigOptionBool                spiral_vase;
     ConfigOptionInt                 standby_temperature_delta;
-    ConfigOptionString              start_gcode;
     ConfigOptionInts                temperature;
     ConfigOptionInt                 threads;
-    ConfigOptionString              toolchange_gcode;
     ConfigOptionFloat               vibration_limit;
     ConfigOptionBools               wipe;
     ConfigOptionFloat               z_offset;
@@ -465,9 +486,8 @@ class PrintConfig : public GCodeConfig
         this->complete_objects.value                             = false;
         this->cooling.value                                      = true;
         this->default_acceleration.value                         = 0;
-        this->disable_fan_first_layers.value                     = 1;
+        this->disable_fan_first_layers.value                     = 3;
         this->duplicate_distance.value                           = 6;
-        this->end_gcode.value                                    = "M104 S0 ; turn off temperature\nG28 X0  ; home X axis\nM84     ; disable motors\n";
         this->extruder_clearance_height.value                    = 20;
         this->extruder_clearance_radius.value                    = 20;
         this->extruder_offset.values.resize(1);
@@ -479,13 +499,12 @@ class PrintConfig : public GCodeConfig
         this->first_layer_extrusion_width.value                  = 200;
         this->first_layer_extrusion_width.percent                = true;
         this->first_layer_speed.value                            = 30;
-        this->first_layer_speed.percent                          = true;
+        this->first_layer_speed.percent                          = false;
         this->first_layer_temperature.values.resize(1);
         this->first_layer_temperature.values[0]                  = 200;
         this->gcode_arcs.value                                   = false;
         this->infill_acceleration.value                          = 0;
         this->infill_first.value                                 = false;
-        this->layer_gcode.value                                  = "";
         this->max_fan_speed.value                                = 100;
         this->min_fan_speed.value                                = 35;
         this->min_print_speed.value                              = 10;
@@ -501,18 +520,16 @@ class PrintConfig : public GCodeConfig
         this->retract_before_travel.values.resize(1);
         this->retract_before_travel.values[0]                    = 2;
         this->retract_layer_change.values.resize(1);
-        this->retract_layer_change.values[0]                     = true;
+        this->retract_layer_change.values[0]                     = false;
         this->skirt_distance.value                               = 6;
         this->skirt_height.value                                 = 1;
         this->skirts.value                                       = 1;
-        this->slowdown_below_layer_time.value                    = 30;
+        this->slowdown_below_layer_time.value                    = 5;
         this->spiral_vase.value                                  = false;
         this->standby_temperature_delta.value                    = -5;
-        this->start_gcode.value                                  = "G28 ; home all axes\nG1 Z5 F5000 ; lift nozzle\n";
         this->temperature.values.resize(1);
         this->temperature.values[0]                              = 200;
         this->threads.value                                      = 2;
-        this->toolchange_gcode.value                             = "";
         this->vibration_limit.value                              = 0;
         this->wipe.values.resize(1);
         this->wipe.values[0]                                     = false;
@@ -531,7 +548,6 @@ class PrintConfig : public GCodeConfig
         if (opt_key == "default_acceleration")                       return &this->default_acceleration;
         if (opt_key == "disable_fan_first_layers")                   return &this->disable_fan_first_layers;
         if (opt_key == "duplicate_distance")                         return &this->duplicate_distance;
-        if (opt_key == "end_gcode")                                  return &this->end_gcode;
         if (opt_key == "extruder_clearance_height")                  return &this->extruder_clearance_height;
         if (opt_key == "extruder_clearance_radius")                  return &this->extruder_clearance_radius;
         if (opt_key == "extruder_offset")                            return &this->extruder_offset;
@@ -545,7 +561,6 @@ class PrintConfig : public GCodeConfig
         if (opt_key == "gcode_arcs")                                 return &this->gcode_arcs;
         if (opt_key == "infill_acceleration")                        return &this->infill_acceleration;
         if (opt_key == "infill_first")                               return &this->infill_first;
-        if (opt_key == "layer_gcode")                                return &this->layer_gcode;
         if (opt_key == "max_fan_speed")                              return &this->max_fan_speed;
         if (opt_key == "min_fan_speed")                              return &this->min_fan_speed;
         if (opt_key == "min_print_speed")                            return &this->min_print_speed;
@@ -566,10 +581,8 @@ class PrintConfig : public GCodeConfig
         if (opt_key == "slowdown_below_layer_time")                  return &this->slowdown_below_layer_time;
         if (opt_key == "spiral_vase")                                return &this->spiral_vase;
         if (opt_key == "standby_temperature_delta")                  return &this->standby_temperature_delta;
-        if (opt_key == "start_gcode")                                return &this->start_gcode;
         if (opt_key == "temperature")                                return &this->temperature;
         if (opt_key == "threads")                                    return &this->threads;
-        if (opt_key == "toolchange_gcode")                           return &this->toolchange_gcode;
         if (opt_key == "vibration_limit")                            return &this->vibration_limit;
         if (opt_key == "wipe")                                       return &this->wipe;
         if (opt_key == "z_offset")                                   return &this->z_offset;

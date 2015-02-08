@@ -26,15 +26,17 @@
     Ref<ExtrusionEntityCollection> fills()
         %code%{ RETVAL = &THIS->fills; %};
     
-    Flow* flow(FlowRole role, bool bridge = false, double width = -1)
-        %code%{ RETVAL = new Flow(THIS->flow(role, bridge, width)); %};
+    Clone<Flow> flow(FlowRole role, bool bridge = false, double width = -1)
+        %code%{ RETVAL = THIS->flow(role, bridge, width); %};
     void merge_slices();
+    void prepare_fill_surfaces();
 };
 
 %name{Slic3r::Layer} class Layer {
     // owned by PrintObject, no constructor/destructor
 
     int id();
+    void set_id(int id);
     Ref<PrintObject> object();
     Ref<Layer> upper_layer()
         %code%{ RETVAL = THIS->upper_layer; %};
@@ -69,12 +71,10 @@
         %code%{ RETVAL = (int)(intptr_t)THIS; %};
     
     void make_slices();
-    bool any_internal_region_slice_contains_line(Line* line)
-        %code%{ RETVAL = THIS->any_internal_region_slice_contains(*line); %};
-    bool any_internal_region_fill_surface_contains_line(Line* line)
-        %code%{ RETVAL = THIS->any_internal_region_fill_surface_contains(*line); %};
-    bool any_internal_region_fill_surface_contains_polyline(Polyline* polyline)
-        %code%{ RETVAL = THIS->any_internal_region_fill_surface_contains(*polyline); %};
+    bool any_internal_region_slice_contains_polyline(Polyline* polyline)
+        %code%{ RETVAL = THIS->any_internal_region_slice_contains(*polyline); %};
+    bool any_bottom_region_slice_contains_polyline(Polyline* polyline)
+        %code%{ RETVAL = THIS->any_bottom_region_slice_contains(*polyline); %};
 };
 
 %name{Slic3r::Layer::Support} class SupportLayer {
@@ -91,6 +91,7 @@
     // copies of some Layer methods, because the parameter wrapper code
     // gets confused about getting a Layer::Support instead of a Layer
     int id();
+    void set_id(int id);
     Ref<PrintObject> object();
     Ref<SupportLayer> upper_layer()
         %code%{ RETVAL = (SupportLayer*)THIS->upper_layer; %};
@@ -121,10 +122,8 @@
     Ref<ExPolygonCollection> slices()
         %code%{ RETVAL = &THIS->slices; %};
     
-    bool any_internal_region_slice_contains_line(Line* line)
-        %code%{ RETVAL = THIS->any_internal_region_slice_contains(*line); %};
-    bool any_internal_region_fill_surface_contains_line(Line* line)
-        %code%{ RETVAL = THIS->any_internal_region_fill_surface_contains(*line); %};
-    bool any_internal_region_fill_surface_contains_polyline(Polyline* polyline)
-        %code%{ RETVAL = THIS->any_internal_region_fill_surface_contains(*polyline); %};
+    bool any_internal_region_slice_contains_polyline(Polyline* polyline)
+        %code%{ RETVAL = THIS->any_internal_region_slice_contains(*polyline); %};
+    bool any_bottom_region_slice_contains_polyline(Polyline* polyline)
+        %code%{ RETVAL = THIS->any_bottom_region_slice_contains(*polyline); %};
 };

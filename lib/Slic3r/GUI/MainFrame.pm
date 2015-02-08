@@ -47,8 +47,14 @@ sub new {
         $self->Fit;
         $self->SetMinSize([760, 490]);
         if (defined $Slic3r::GUI::Settings->{_}{main_frame_size}) {
-            $self->SetSize([ split ',', $Slic3r::GUI::Settings->{_}{main_frame_size}, 2 ]);
-            $self->Move([ split ',', $Slic3r::GUI::Settings->{_}{main_frame_pos}, 2 ]);
+            my $size = [ split ',', $Slic3r::GUI::Settings->{_}{main_frame_size}, 2 ];
+            $self->SetSize($size);
+            
+            my $display = Wx::Display->new->GetClientArea();
+            my $pos = [ split ',', $Slic3r::GUI::Settings->{_}{main_frame_pos}, 2 ];
+            if (($pos->[X] + $size->[X]/2) < $display->GetRight && ($pos->[Y] + $size->[Y]/2) < $display->GetBottom) {
+                $self->Move($pos);
+            }
             $self->Maximize(1) if $Slic3r::GUI::Settings->{_}{main_frame_maximized};
         } else {
             $self->SetSize($self->GetMinSize);
@@ -201,10 +207,10 @@ sub _init_menubar {
         $self->_append_menu_item($self->{plater_menu}, "Export G-code...", 'Export current plate as G-code', sub {
             $plater->export_gcode;
         });
-        $self->_append_menu_item($self->{plater_menu}, "Export STL...", 'Export current plate as STL', sub {
+        $self->_append_menu_item($self->{plater_menu}, "Export plate as STL...", 'Export current plate as STL', sub {
             $plater->export_stl;
         });
-        $self->_append_menu_item($self->{plater_menu}, "Export AMF...", 'Export current plate as AMF', sub {
+        $self->_append_menu_item($self->{plater_menu}, "Export plate as AMF...", 'Export current plate as AMF', sub {
             $plater->export_amf;
         });
         

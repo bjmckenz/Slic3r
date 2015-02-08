@@ -9,6 +9,7 @@ namespace Slic3r {
 class Line;
 class Linef3;
 class Polyline;
+typedef std::vector<Line> Lines;
 
 class Line
 {
@@ -18,15 +19,17 @@ class Line
     Line() {};
     explicit Line(Point _a, Point _b): a(_a), b(_b) {};
     std::string wkt() const;
+    operator Lines() const;
     operator Polyline() const;
     void scale(double factor);
     void translate(double x, double y);
     void rotate(double angle, const Point &center);
     void reverse();
     double length() const;
-    Point* midpoint() const;
+    Point midpoint() const;
     void point_at(double distance, Point* point) const;
     Point point_at(double distance) const;
+    bool intersection_infinite(const Line &other, Point* point) const;
     bool coincides_with(const Line &line) const;
     double distance_to(const Point &point) const;
     bool parallel_to(double angle) const;
@@ -45,7 +48,14 @@ class Line
     #endif
 };
 
-typedef std::vector<Line> Lines;
+class Linef
+{
+    public:
+    Pointf a;
+    Pointf b;
+    Linef() {};
+    explicit Linef(Pointf _a, Pointf _b): a(_a), b(_b) {};
+};
 
 class Linef3
 {
@@ -55,6 +65,7 @@ class Linef3
     Linef3() {};
     explicit Linef3(Pointf3 _a, Pointf3 _b): a(_a), b(_b) {};
     Pointf3 intersect_plane(double z) const;
+    void scale(double factor);
     
     #ifdef SLIC3RXS
     void from_SV(SV* line_sv);

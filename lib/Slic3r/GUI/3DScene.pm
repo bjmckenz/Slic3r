@@ -1,4 +1,4 @@
-package Slic3r::GUI::PreviewCanvas;
+package Slic3r::GUI::3DScene::Base;
 use strict;
 use warnings;
 
@@ -8,11 +8,12 @@ use OpenGL qw(:glconstants :glfunctions :glufunctions :gluconstants);
 use base qw(Wx::GLCanvas Class::Accessor);
 use Math::Trig qw(asin);
 use List::Util qw(reduce min max first);
-use Slic3r::Geometry qw(X Y Z MIN MAX triangle_normal normalize deg2rad tan scale unscale);
+use Slic3r::Geometry qw(X Y Z MIN MAX triangle_normal normalize deg2rad tan scale unscale scaled_epsilon);
 use Slic3r::Geometry::Clipper qw(offset_ex intersection_pl);
 use Wx::GLCanvas qw(:all);
  
 __PACKAGE__->mk_accessors( qw(_quat _dirty init
+                              enable_cutting
                               enable_picking
                               enable_moving
                               on_hover
@@ -21,13 +22,13 @@ __PACKAGE__->mk_accessors( qw(_quat _dirty init
                               on_right_click
                               on_move
                               volumes
-                              print
                               _sphi _stheta
                               cutting_plane_z
                               cut_lines_vertices
                               bed_shape
                               bed_triangles
                               bed_grid_lines
+                              background
                               origin
                               _mouse_pos
                               _hover_volume_idx
@@ -39,12 +40,12 @@ __PACKAGE__->mk_accessors( qw(_quat _dirty init
                               _zoom
                               ) );
 
-use constant TRACKBALLSIZE => 0.8;
+use constant TRACKBALLSIZE  => 0.8;
 use constant TURNTABLE_MODE => 1;
-use constant GROUND_Z       => 0.02;
+use constant GROUND_Z       => -0.02;
+use constant DEFAULT_COLOR  => [1,1,0];
 use constant SELECTED_COLOR => [0,1,0,1];
-use constant HOVER_COLOR    => [0.8,0.8,0,1];
-use constant COLORS => [ [1,1,0], [1,0.5,0.5], [0.5,1,0.5], [0.5,0.5,1] ];
+use constant HOVER_COLOR    => [0.4,0.9,0,1];
 
 # make OpenGL::Array thread-safe
 {
@@ -60,6 +61,7 @@ sub new {
     my $self = $class->SUPER::new($parent, -1, Wx::wxDefaultPosition, Wx::wxDefaultSize, 0, "",
         [WX_GL_RGBA, WX_GL_DOUBLEBUFFER, WX_GL_DEPTH_SIZE, 16, 0]);
    
+    $self->background(1);
     $self->_quat((0, 0, 0, 1));
     $self->_stheta(45);
     $self->_sphi(45);
@@ -88,7 +90,7 @@ sub new {
         my $zoom = $e->GetWheelRotation() / $e->GetWheelDelta();
         $zoom = max(min($zoom, 4), -4);
         $zoom /= 10;
-        $self->_zoom($self->_zoom * (1-$zoom));
+        $self->_zoom($self->_zoom / (1-$zoom));
         
         # In order to zoom around the mouse point we need to translate
         # the camera target
@@ -133,6 +135,17 @@ sub mouse_event {
         if ($self->enable_picking) {
             $self->deselect_volumes;
             $self->select_volume($volume_idx);
+            
+            if ($volume_idx != -1) {
+                my $group_id = $self->volumes->[$volume_idx]->select_group_id;
+                my @volumes;
+                if ($group_id != -1) {
+                    $self->select_volume($_)
+                        for grep $self->volumes->[$_]->select_group_id == $group_id,
+                        0..$#{$self->volumes};
+                }
+            }
+            
             $self->Refresh;
         }
         
@@ -161,15 +174,20 @@ sub mouse_event {
         # get volume being dragged
         my $volume = $self->volumes->[$self->_drag_volume_idx];
         
-        # get all volumes belonging to the same group but only having the same instance_idx
-        my @volumes = grep $_->group_id == $volume->group_id && $_->instance_idx == $volume->instance_idx, @{$self->volumes};
+        # get all volumes belonging to the same group, if any
+        my @volumes;
+        if ($volume->drag_group_id == -1) {
+            @volumes = ($volume);
+        } else {
+            @volumes = grep $_->drag_group_id == $volume->drag_group_id, @{$self->volumes};
+        }
         
         # apply new temporary volume origin and ignore Z
         $_->origin->translate($vector->x, $vector->y, 0) for @volumes; #,,
         $self->_drag_start_pos($cur_pos);
         $self->_dragged(1);
         $self->Refresh;
-    } elsif ($e->Dragging && !defined $self->_hover_volume_idx) {
+    } elsif ($e->Dragging) {
         if ($e->LeftIsDown) {
             # if dragging over blank area with left button, rotate
             if (defined $self->_drag_start_pos) {
@@ -206,9 +224,18 @@ sub mouse_event {
             }
             $self->_drag_start_xy($pos);
         }
-    } elsif ($e->LeftUp || $e->RightUp) {
-        if ($self->on_move && defined $self->_drag_volume_idx) {
-            $self->on_move->($self->_drag_volume_idx) if $self->_dragged;
+    } elsif ($e->LeftUp || $e->MiddleUp || $e->RightUp) {
+        if ($self->on_move && defined($self->_drag_volume_idx) && $self->_dragged) {
+            # get all volumes belonging to the same group, if any
+            my @volume_idxs;
+            my $group_id = $self->volumes->[$self->_drag_volume_idx]->drag_group_id;
+            if ($group_id == -1) {
+                @volume_idxs = ($self->_drag_volume_idx);
+            } else {
+                @volume_idxs = grep $self->volumes->[$_]->drag_group_id == $group_id,
+                    0..$#{$self->volumes};
+            }
+            $self->on_move->(@volume_idxs);
         }
         $self->_drag_volume_idx(undef);
         $self->_drag_start_pos(undef);
@@ -254,7 +281,7 @@ sub zoom_to_volume {
     my ($self, $volume_idx) = @_;
     
     my $volume = $self->volumes->[$volume_idx];
-    my $bb = $volume->bounding_box;
+    my $bb = $volume->transformed_bounding_box;
     $self->zoom_to_bounding_box($bb);
 }
 
@@ -267,7 +294,7 @@ sub volumes_bounding_box {
     my ($self) = @_;
     
     my $bb = Slic3r::Geometry::BoundingBoxf3->new;
-    $bb->merge($_->bounding_box) for @{$self->volumes};
+    $bb->merge($_->transformed_bounding_box) for @{$self->volumes};
     return $bb;
 }
 
@@ -327,7 +354,15 @@ sub set_bed_shape {
         for (my $y = $bed_bb->y_min; $y <= $bed_bb->y_max; $y += scale 10) {
             push @lines, Slic3r::Polyline->new([$bed_bb->x_min,$y], [$bed_bb->x_max,$y]);
         }
-        @lines = @{intersection_pl(\@lines, [ @$expolygon ])};
+        # clip with a slightly grown expolygon because our lines lay on the contours and
+        # may get erroneously clipped
+        @lines = @{intersection_pl(\@lines, [ @{$expolygon->offset(+scaled_epsilon)} ])};
+        
+        # append bed contours
+        foreach my $line (map @{$_->lines}, @$expolygon) {
+            push @lines, $line->as_polyline;
+        }
+        
         my @points = ();
         foreach my $polyline (@lines) {
             push @points, map {+ unscale($_->x), unscale($_->y), GROUND_Z } @$polyline;  #))
@@ -336,59 +371,6 @@ sub set_bed_shape {
     }
     
     $self->origin(Slic3r::Pointf->new(0,0));
-}
-
-sub load_object {
-    my ($self, $object, $all_instances) = @_;
-    
-    my $z_min = $object->raw_bounding_box->z_min;
-    
-    # color mesh(es) by material
-    my @materials = ();
-    
-    # sort volumes: non-modifiers first
-    my @volumes = sort { ($a->modifier // 0) <=> ($b->modifier // 0) } @{$object->volumes};
-    my @volumes_idx = ();
-    my $group_id = $#{$self->volumes} + 1;
-    foreach my $volume (@volumes) {
-        my @instance_idxs = $all_instances ? (0..$#{$object->instances}) : (0);
-        foreach my $instance_idx (@instance_idxs) {
-            my $instance = $object->instances->[$instance_idx];
-            my $mesh = $volume->mesh->clone;
-            $instance->transform_mesh($mesh);
-            
-            my $material_id = $volume->material_id // '_';
-            my $color_idx = first { $materials[$_] eq $material_id } 0..$#materials;
-            if (!defined $color_idx) {
-                push @materials, $material_id;
-                $color_idx = $#materials;
-            }
-        
-            my $color = [ @{COLORS->[ $color_idx % scalar(@{&COLORS}) ]} ];
-            push @$color, $volume->modifier ? 0.5 : 1;
-            push @{$self->volumes}, my $v = Slic3r::GUI::PreviewCanvas::Volume->new(
-                group_id        => $group_id,
-                instance_idx    => $instance_idx,
-                mesh            => $mesh,
-                color           => $color,
-                origin          => Slic3r::Pointf3->new(0,0,-$z_min),
-            );
-            push @volumes_idx, $#{$self->volumes};
-        
-            {
-                my $vertices = $mesh->vertices;
-                my @verts = map @{ $vertices->[$_] }, map @$_, @{$mesh->facets};
-                $v->verts(OpenGL::Array->new_list(GL_FLOAT, @verts));
-            }
-        
-            {
-                my @norms = map { @$_, @$_, @$_ } @{$mesh->normals};
-                $v->norms(OpenGL::Array->new_list(GL_FLOAT, @norms));
-            }
-        }
-    }
-    
-    return @volumes_idx;
 }
 
 sub deselect_volumes {
@@ -412,6 +394,7 @@ sub SetCuttingPlane {
     my @verts = ();
     foreach my $volume (@{$self->volumes}) {
         foreach my $volume (@{$self->volumes}) {
+            next if !$volume->mesh;
             my $expolygons = $volume->mesh->slice([ $z - $volume->origin->z ])->[0];
             $expolygons = offset_ex([ map @$_, @$expolygons ], scale 0.1);
             
@@ -580,7 +563,7 @@ sub Resize {
  
     return unless $self->GetContext;
     $self->_dirty(0);
- 
+    
     $self->SetCurrent($self->GetContext);
     glViewport(0, 0, $x, $y);
  
@@ -619,17 +602,16 @@ sub InitGL {
     glEnable(GL_MULTISAMPLE);
     
     # ambient lighting
-    glLightModelfv_p(GL_LIGHT_MODEL_AMBIENT, 0.1, 0.1, 0.1, 1);
+    glLightModelfv_p(GL_LIGHT_MODEL_AMBIENT, 0.3, 0.3, 0.3, 1);
     
     glEnable(GL_LIGHTING);
     glEnable(GL_LIGHT0);
     glEnable(GL_LIGHT1);
-    glLightfv_p(GL_LIGHT0, GL_POSITION, 0.5, 0.5, 1, 0);
-    glLightfv_p(GL_LIGHT0, GL_SPECULAR, 0.5, 0.5, 0.5, 1);
-    glLightfv_p(GL_LIGHT0, GL_DIFFUSE,  0.8, 0.8, 0.8, 1);
-    glLightfv_p(GL_LIGHT1, GL_POSITION, 1, 0, 0.5, 0);
-    glLightfv_p(GL_LIGHT1, GL_SPECULAR, 0.5, 0.5, 0.5, 1);
-    glLightfv_p(GL_LIGHT1, GL_DIFFUSE,  1, 1, 1, 1);
+    
+    # light from camera
+    glLightfv_p(GL_LIGHT1, GL_POSITION, 1, 0, 1, 0);
+    glLightfv_p(GL_LIGHT1, GL_SPECULAR, 0.3, 0.3, 0.3, 1);
+    glLightfv_p(GL_LIGHT1, GL_DIFFUSE,  0.2, 0.2, 0.2, 1);
     
     # Enables Smooth Color Shading; try GL_FLAT for (lack of) fun.
     glShadeModel(GL_SMOOTH);
@@ -671,6 +653,11 @@ sub Render {
     }
     glTranslatef(@{ $self->_camera_target->negative });
     
+    # light from above
+    glLightfv_p(GL_LIGHT0, GL_POSITION, -0.5, -0.5, 1, 0);
+    glLightfv_p(GL_LIGHT0, GL_SPECULAR, 0.2, 0.2, 0.2, 1);
+    glLightfv_p(GL_LIGHT0, GL_DIFFUSE,  0.5, 0.5, 0.5, 1);
+    
     if ($self->enable_picking) {
         glDisable(GL_LIGHTING);
         $self->draw_volumes(1);
@@ -684,7 +671,13 @@ sub Render {
             $_->hover(0) for @{$self->volumes};
             if ($volume_idx <= $#{$self->volumes}) {
                 $self->_hover_volume_idx($volume_idx);
+                
                 $self->volumes->[$volume_idx]->hover(1);
+                my $group_id = $self->volumes->[$volume_idx]->select_group_id;
+                if ($group_id != -1) {
+                    $_->hover(1) for grep { $_->select_group_id == $group_id } @{$self->volumes};
+                }
+                
                 $self->on_hover->($volume_idx) if $self->on_hover;
             }
         }
@@ -693,86 +686,120 @@ sub Render {
         glFinish();
         glEnable(GL_LIGHTING);
     }
-    # draw objects
-    $self->draw_volumes;
+    
+    # draw fixed background
+    if ($self->background) {
+        glDisable(GL_LIGHTING);
+        glPushMatrix();
+        glLoadIdentity();
+        
+        glMatrixMode(GL_PROJECTION);
+        glPushMatrix();
+        glLoadIdentity();
+        
+        glBegin(GL_QUADS);
+        glColor3f(0.0,0.0,0.0);
+        glVertex2f(-1.0,-1.0);
+        glVertex2f(1,-1.0);
+        glColor3f(10/255,98/255,144/255);
+        glVertex2f(1, 1);
+        glVertex2f(-1.0, 1);
+        glEnd();
+        glPopMatrix();
+        
+        glMatrixMode(GL_MODELVIEW);
+        glPopMatrix();
+        glEnable(GL_LIGHTING);
+    }
     
     # draw ground and axes
     glDisable(GL_LIGHTING);
-    my $z0 = 0;
+    
+    # draw ground
+    my $ground_z = GROUND_Z;
+    if ($self->bed_triangles) {
+        glDisable(GL_DEPTH_TEST);
+        
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glColor4f(0.8, 0.6, 0.5, 0.4);
+        glNormal3d(0,0,1);
+        glVertexPointer_p(3, $self->bed_triangles);
+        glDrawArrays(GL_TRIANGLES, 0, $self->bed_triangles->elements / 3);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        
+        # we need depth test for grid, otherwise it would disappear when looking
+        # the object from below
+        glEnable(GL_DEPTH_TEST);
+    
+        # draw grid
+        glLineWidth(3);
+        glColor4f(0.2, 0.2, 0.2, 0.4);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glVertexPointer_p(3, $self->bed_grid_lines);
+        glDrawArrays(GL_LINES, 0, $self->bed_grid_lines->elements / 3);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        
+        glDisable(GL_BLEND);
+    }
+    
+    my $volumes_bb = $self->volumes_bounding_box;
     
     {
-        # draw ground
-        my $ground_z = GROUND_Z;
-        if ($self->bed_triangles) {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            
-            glEnableClientState(GL_VERTEX_ARRAY);
-            glColor4f(0.6, 0.7, 0.5, 0.3);
-            glNormal3d(0,0,1);
-            glVertexPointer_p(3, $self->bed_triangles);
-            glDrawArrays(GL_TRIANGLES, 0, $self->bed_triangles->elements / 3);
-            glDisableClientState(GL_VERTEX_ARRAY);
-            
-            glDisable(GL_BLEND);
-        
-            # draw grid
-            glTranslatef(0, 0, 0.02);
-            glLineWidth(3);
-            glColor3f(0.95, 0.95, 0.95);
-            glEnableClientState(GL_VERTEX_ARRAY);
-            glVertexPointer_p(3, $self->bed_grid_lines);
-            glDrawArrays(GL_LINES, 0, $self->bed_grid_lines->elements / 3);
-            glDisableClientState(GL_VERTEX_ARRAY);
-        }
-        
-        my $volumes_bb = $self->volumes_bounding_box;
-        
-        {
-            # draw axes
-            $ground_z += 0.02;
-            my $origin = $self->origin;
-            my $axis_len = max(
-                0.3 * max(@{ $self->bed_bounding_box->size }),
-                  2 * max(@{ $volumes_bb->size }),
-            );
-            glLineWidth(2);
-            glBegin(GL_LINES);
-            # draw line for x axis
-            glColor3f(1, 0, 0);
-            glVertex3f(@$origin, $ground_z);
-            glVertex3f($origin->x + $axis_len, $origin->y, $ground_z);  #,,
-            # draw line for y axis
-            glColor3f(0, 1, 0);
-            glVertex3f(@$origin, $ground_z);
-            glVertex3f($origin->x, $origin->y + $axis_len, $ground_z);  #++
-            # draw line for Z axis
-            glColor3f(0, 0, 1);
-            glVertex3f(@$origin, $ground_z);
-            glVertex3f(@$origin, $ground_z+$axis_len);
-            glEnd();
-        }
-        
-        # draw cutting plane
-        if (defined $self->cutting_plane_z) {
-            my $plane_z = $z0 + $self->cutting_plane_z;
-            my $bb = $volumes_bb;
-            glDisable(GL_CULL_FACE);
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glBegin(GL_QUADS);
-            glColor4f(0.8, 0.8, 0.8, 0.5);
-            glVertex3f($bb->x_min-20, $bb->y_min-20, $plane_z);
-            glVertex3f($bb->x_max+20, $bb->y_min-20, $plane_z);
-            glVertex3f($bb->x_max+20, $bb->y_max+20, $plane_z);
-            glVertex3f($bb->x_min-20, $bb->y_max+20, $plane_z);
-            glEnd();
-            glEnable(GL_CULL_FACE);
-            glDisable(GL_BLEND);
-        }
+        # draw axes
+        # disable depth testing so that axes are not covered by ground
+        glDisable(GL_DEPTH_TEST);
+        my $origin = $self->origin;
+        my $axis_len = max(
+            0.3 * max(@{ $self->bed_bounding_box->size }),
+              2 * max(@{ $volumes_bb->size }),
+        );
+        glLineWidth(2);
+        glBegin(GL_LINES);
+        # draw line for x axis
+        glColor3f(1, 0, 0);
+        glVertex3f(@$origin, $ground_z);
+        glVertex3f($origin->x + $axis_len, $origin->y, $ground_z);  #,,
+        # draw line for y axis
+        glColor3f(0, 1, 0);
+        glVertex3f(@$origin, $ground_z);
+        glVertex3f($origin->x, $origin->y + $axis_len, $ground_z);  #++
+        glEnd();
+        # draw line for Z axis
+        # (re-enable depth test so that axis is correctly shown when objects are behind it)
+        glEnable(GL_DEPTH_TEST);
+        glBegin(GL_LINES);
+        glColor3f(0, 0, 1);
+        glVertex3f(@$origin, $ground_z);
+        glVertex3f(@$origin, $ground_z+$axis_len);
+        glEnd();
     }
     
     glEnable(GL_LIGHTING);
+    
+    # draw objects
+    $self->draw_volumes;
+    
+    # draw cutting plane
+    if (defined $self->cutting_plane_z) {
+        my $plane_z = $self->cutting_plane_z;
+        my $bb = $volumes_bb;
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_LIGHTING);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glBegin(GL_QUADS);
+        glColor4f(0.8, 0.8, 0.8, 0.5);
+        glVertex3f($bb->x_min-20, $bb->y_min-20, $plane_z);
+        glVertex3f($bb->x_max+20, $bb->y_min-20, $plane_z);
+        glVertex3f($bb->x_max+20, $bb->y_max+20, $plane_z);
+        glVertex3f($bb->x_min-20, $bb->y_max+20, $plane_z);
+        glEnd();
+        glEnable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+    }
     
     glFlush();
  
@@ -785,69 +812,6 @@ sub draw_volumes {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     
-    if (defined($self->print) && !$fakecolor) {
-        my $tess = gluNewTess();
-        gluTessCallback($tess, GLU_TESS_BEGIN,     'DEFAULT');
-        gluTessCallback($tess, GLU_TESS_END,       'DEFAULT');
-        gluTessCallback($tess, GLU_TESS_VERTEX,    'DEFAULT');
-        gluTessCallback($tess, GLU_TESS_COMBINE,   'DEFAULT');
-        gluTessCallback($tess, GLU_TESS_ERROR,     'DEFAULT');
-        gluTessCallback($tess, GLU_TESS_EDGE_FLAG, 'DEFAULT');
-        
-        foreach my $object (@{$self->print->objects}) {
-            foreach my $layer (@{$object->layers}) {
-                my $gap = 0;
-                my $top_z = $layer->print_z;
-                my $bottom_z = $layer->print_z - $layer->height + $gap;
-            
-                foreach my $copy (@{ $object->_shifted_copies }) {
-                    glPushMatrix();
-                    glTranslatef(map unscale($_), @$copy, 0);
-                    
-                    foreach my $slice (@{$layer->slices}) {
-                        glColor3f(@{COLORS->[0]});
-                        gluTessBeginPolygon($tess);
-                        glNormal3f(0,0,1);
-                        foreach my $polygon (@$slice) {
-                            gluTessBeginContour($tess);
-                            gluTessVertex_p($tess, (map unscale($_), @$_), $layer->print_z) for @$polygon;
-                            gluTessEndContour($tess);
-                        }
-                        gluTessEndPolygon($tess);
-                        
-                        foreach my $polygon (@$slice) {
-                            foreach my $line (@{$polygon->lines}) {
-                                if (0) {
-                                    glLineWidth(1);
-                                    glColor3f(0,0,0);
-                                    glBegin(GL_LINES);
-                                    glVertex3f((map unscale($_), @{$line->a}), $bottom_z);
-                                    glVertex3f((map unscale($_), @{$line->b}), $bottom_z);
-                                    glEnd();
-                                }
-                                
-                                glLineWidth(0);
-                                glColor3f(@{COLORS->[0]});
-                                glBegin(GL_QUADS);
-                                glNormal3f((map $_/$line->length, @{$line->normal}), 0);
-                                glVertex3f((map unscale($_), @{$line->a}), $bottom_z);
-                                glVertex3f((map unscale($_), @{$line->b}), $bottom_z);
-                                glVertex3f((map unscale($_), @{$line->b}), $top_z);
-                                glVertex3f((map unscale($_), @{$line->a}), $top_z);
-                                glEnd();
-                            }
-                        }
-                    }
-                    
-                    glPopMatrix();  # copy
-                }
-            }
-        }
-        
-        gluDeleteTess($tess);
-        return;
-    }
-    
     glEnableClientState(GL_VERTEX_ARRAY);
     glEnableClientState(GL_NORMAL_ARRAY);
     
@@ -856,10 +820,6 @@ sub draw_volumes {
         glPushMatrix();
         glTranslatef(@{$volume->origin});
         
-        glVertexPointer_p(3, $volume->verts);
-        
-        glCullFace(GL_BACK);
-        glNormalPointer_p($volume->norms);
         if ($fakecolor) {
             my $r = ($volume_idx & 0x000000FF) >>  0;
             my $g = ($volume_idx & 0x0000FF00) >>  8;
@@ -872,7 +832,49 @@ sub draw_volumes {
         } else {
             glColor4f(@{ $volume->color });
         }
-        glDrawArrays(GL_TRIANGLES, 0, $volume->verts->elements / 3);
+        
+        my @sorted_z = ();
+        my ($min_z, $max_z);
+        if ($volume->range && $volume->offsets) {
+            @sorted_z = sort { $a <=> $b } keys %{$volume->offsets};
+            
+            ($min_z, $max_z) = @{$volume->range};
+            $min_z = first { $_ >= $min_z } @sorted_z;
+            $max_z = first { $_ > $max_z }  @sorted_z;
+        }
+        
+        glCullFace(GL_BACK);
+        if ($volume->qverts) {
+            my ($min_offset, $max_offset);
+            if (defined $min_z) {
+                $min_offset = $volume->offsets->{$min_z}->[0];
+            }
+            if (defined $max_z) {
+                $max_offset = $volume->offsets->{$max_z}->[0];
+            }
+            $min_offset //= 0;
+            $max_offset //= $volume->qverts->size;
+            
+            glVertexPointer_c(3, GL_FLOAT, 0, $volume->qverts->verts_ptr);
+            glNormalPointer_c(GL_FLOAT, 0, $volume->qverts->norms_ptr);
+            glDrawArrays(GL_QUADS, $min_offset / 3, ($max_offset-$min_offset) / 3);
+        }
+        
+        if ($volume->tverts) {
+            my ($min_offset, $max_offset);
+            if (defined $min_z) {
+                $min_offset = $volume->offsets->{$min_z}->[1];
+            }
+            if (defined $max_z) {
+                $max_offset = $volume->offsets->{$max_z}->[1];
+            }
+            $min_offset //= 0;
+            $max_offset //= $volume->tverts->size;
+            
+            glVertexPointer_c(3, GL_FLOAT, 0, $volume->tverts->verts_ptr);
+            glNormalPointer_c(GL_FLOAT, 0, $volume->tverts->norms_ptr);
+            glDrawArrays(GL_TRIANGLES, $min_offset / 3, ($max_offset-$min_offset) / 3);
+        }
         
         glPopMatrix();
     }
@@ -888,25 +890,352 @@ sub draw_volumes {
     glDisableClientState(GL_VERTEX_ARRAY);
 }
 
-package Slic3r::GUI::PreviewCanvas::Volume;
+package Slic3r::GUI::3DScene::Volume;
 use Moo;
 
-has 'mesh'          => (is => 'ro', required => 1);
-has 'color'         => (is => 'ro', required => 1);
-has 'group_id'      => (is => 'ro', required => 1);
-has 'instance_idx'  => (is => 'ro', default => sub { 0 });
-has 'origin'        => (is => 'rw', default => sub { Slic3r::Pointf3->new(0,0,0) });
-has 'verts'         => (is => 'rw');
-has 'norms'         => (is => 'rw');
-has 'selected'      => (is => 'rw', default => sub { 0 });
-has 'hover'         => (is => 'rw', default => sub { 0 });
+has 'bounding_box'      => (is => 'ro', required => 1);
+has 'origin'            => (is => 'rw', default => sub { Slic3r::Pointf3->new(0,0,0) });
+has 'color'             => (is => 'ro', required => 1);
+has 'select_group_id'   => (is => 'rw', default => sub { -1 });
+has 'drag_group_id'     => (is => 'rw', default => sub { -1 });
+has 'selected'          => (is => 'rw', default => sub { 0 });
+has 'hover'             => (is => 'rw', default => sub { 0 });
+has 'range'             => (is => 'rw');
 
-sub bounding_box {
+# geometric data
+has 'qverts'            => (is => 'rw');  # GLVertexArray object
+has 'tverts'            => (is => 'rw');  # GLVertexArray object
+has 'mesh'              => (is => 'rw');  # only required for cut contours
+has 'offsets'           => (is => 'rw');  # [ z => [ qverts_idx, tverts_idx ] ]
+
+sub transformed_bounding_box {
     my ($self) = @_;
     
-    my $bb = $self->mesh->bounding_box;
+    my $bb = $self->bounding_box;
     $bb->translate(@{$self->origin});
     return $bb;
+}
+
+package Slic3r::GUI::3DScene;
+use base qw(Slic3r::GUI::3DScene::Base);
+
+use OpenGL qw(:glconstants :gluconstants :glufunctions);
+use List::Util qw(first);
+use Slic3r::Geometry qw(scale unscale epsilon);
+use Slic3r::Print::State ':steps';
+
+use constant COLORS => [ [1,1,0,1], [1,0.5,0.5,1], [0.5,1,0.5,1], [0.5,0.5,1,1] ];
+
+__PACKAGE__->mk_accessors(qw(
+    color_by
+    select_by
+    drag_by
+    volumes_by_object
+    _objects_by_volumes
+));
+
+sub new {
+    my $class = shift;
+    
+    my $self = $class->SUPER::new(@_);
+    $self->color_by('volume');      # object | volume
+    $self->select_by('object');     # object | volume | instance
+    $self->drag_by('instance');     # object | instance
+    $self->volumes_by_object({});   # obj_idx => [ volume_idx, volume_idx ... ]
+    $self->_objects_by_volumes({}); # volume_idx => [ obj_idx, instance_idx ]
+    
+    return $self;
+}
+
+sub load_object {
+    my ($self, $model, $obj_idx, $instance_idxs) = @_;
+    
+    my $model_object;
+    if ($model->isa('Slic3r::Model::Object')) {
+        $model_object = $model;
+        $model = $model_object->model;
+        $obj_idx = 0;
+    } else {
+        $model_object = $model->get_object($obj_idx);
+    }
+    
+    $instance_idxs ||= [0..$#{$model_object->instances}];
+    
+    my @volumes_idx = ();
+    foreach my $volume_idx (0..$#{$model_object->volumes}) {
+        my $volume = $model_object->volumes->[$volume_idx];
+        foreach my $instance_idx (@$instance_idxs) {
+            my $instance = $model_object->instances->[$instance_idx];
+            my $mesh = $volume->mesh->clone;
+            $instance->transform_mesh($mesh);
+            
+            my $color_idx;
+            if ($self->color_by eq 'volume') {
+                $color_idx = $volume_idx;
+            } elsif ($self->color_by eq 'object') {
+                $color_idx = $obj_idx;
+            }
+        
+            my $color = [ @{COLORS->[ $color_idx % scalar(@{&COLORS}) ]} ];
+            $color->[3] = $volume->modifier ? 0.5 : 1;
+            push @{$self->volumes}, my $v = Slic3r::GUI::3DScene::Volume->new(
+                bounding_box    => $mesh->bounding_box,
+                color           => $color,
+            );
+            $v->mesh($mesh) if $self->enable_cutting;
+            if ($self->select_by eq 'object') {
+                $v->select_group_id($obj_idx*1000000);
+            } elsif ($self->select_by eq 'volume') {
+                $v->select_group_id($obj_idx*1000000 + $volume_idx*1000);
+            } elsif ($self->select_by eq 'instance') {
+                $v->select_group_id($obj_idx*1000000 + $volume_idx*1000 + $instance_idx);
+            }
+            if ($self->drag_by eq 'object') {
+                $v->drag_group_id($obj_idx*1000);
+            } elsif ($self->drag_by eq 'instance') {
+                $v->drag_group_id($obj_idx*1000 + $instance_idx);
+            }
+            push @volumes_idx, my $scene_volume_idx = $#{$self->volumes};
+            $self->_objects_by_volumes->{$scene_volume_idx} = [ $obj_idx, $volume_idx, $instance_idx ];
+            
+            my $verts = Slic3r::GUI::_3DScene::GLVertexArray->new;
+            $verts->load_mesh($mesh);
+            $v->tverts($verts);
+        }
+    }
+    
+    $self->volumes_by_object->{$obj_idx} = [@volumes_idx];
+    return @volumes_idx;
+}
+
+sub load_print_object_slices {
+    my ($self, $object) = @_;
+    
+    my @verts = ();
+    my @norms = ();
+    my @quad_verts = ();
+    my @quad_norms = ();
+    foreach my $layer (@{$object->layers}) {
+        my $gap = 0;
+        my $top_z = $layer->print_z;
+        my $bottom_z = $layer->print_z - $layer->height + $gap;
+    
+        foreach my $copy (@{ $object->_shifted_copies }) {
+            {
+                my @expolygons = map $_->clone, @{$layer->slices};
+                $_->translate(@$copy) for @expolygons;
+                $self->_expolygons_to_verts(\@expolygons, $layer->print_z, \@verts, \@norms);
+            }
+            foreach my $slice (@{$layer->slices}) {
+                foreach my $polygon (@$slice) {
+                    foreach my $line (@{$polygon->lines}) {
+                        $line->translate(@$copy);
+                        
+                        push @quad_norms, (0,0,-1), (0,0,-1);
+                        push @quad_verts, (map unscale($_), @{$line->a}), $bottom_z;
+                        push @quad_verts, (map unscale($_), @{$line->b}), $bottom_z;
+                        push @quad_norms, (0,0,1), (0,0,1);
+                        push @quad_verts, (map unscale($_), @{$line->b}), $top_z;
+                        push @quad_verts, (map unscale($_), @{$line->a}), $top_z;
+                        
+                        # We'll use this for the middle normal when using 4 quads:
+                        #my $xy_normal = $line->normal;
+                        #$_xynormal->scale(1/$line->length);
+                    }
+                }
+            }
+        }
+    }
+    
+    my $obb = $object->bounding_box;
+    my $bb = Slic3r::Geometry::BoundingBoxf3->new;
+    $bb->merge_point(Slic3r::Pointf3->new_unscale(@{$obb->min_point}, 0));
+    $bb->merge_point(Slic3r::Pointf3->new_unscale(@{$obb->max_point}, $object->size->z));
+    
+    push @{$self->volumes}, my $v = Slic3r::GUI::3DScene::Volume->new(
+        bounding_box    => $bb,
+        color           => COLORS->[0],
+        verts           => OpenGL::Array->new_list(GL_FLOAT, @verts),
+        norms           => OpenGL::Array->new_list(GL_FLOAT, @norms),
+        quad_verts      => OpenGL::Array->new_list(GL_FLOAT, @quad_verts),
+        quad_norms      => OpenGL::Array->new_list(GL_FLOAT, @quad_norms),
+    );
+}
+
+sub load_print_object_toolpaths {
+    my ($self, $object) = @_;
+    
+    my $perim_qverts    = Slic3r::GUI::_3DScene::GLVertexArray->new;
+    my $perim_tverts    = Slic3r::GUI::_3DScene::GLVertexArray->new;
+    my $infill_qverts   = Slic3r::GUI::_3DScene::GLVertexArray->new;
+    my $infill_tverts   = Slic3r::GUI::_3DScene::GLVertexArray->new;
+    my $support_qverts  = Slic3r::GUI::_3DScene::GLVertexArray->new;
+    my $support_tverts  = Slic3r::GUI::_3DScene::GLVertexArray->new;
+    
+    my %perim_offsets   = ();  # print_z => [ qverts, tverts ]
+    my %infill_offsets  = ();
+    my %support_offsets = ();
+    
+    # order layers by print_z
+    my @layers = sort { $a->print_z <=> $b->print_z }
+        @{$object->layers}, @{$object->support_layers};
+    
+    foreach my $layer (@layers) {
+        my $top_z = $layer->print_z;
+        
+        if (!exists $perim_offsets{$top_z}) {
+            $perim_offsets{$top_z} = [
+                $perim_qverts->size, $perim_tverts->size,
+            ];
+            $infill_offsets{$top_z} = [
+                $infill_qverts->size, $infill_tverts->size,
+            ];
+            $support_offsets{$top_z} = [
+                $support_qverts->size, $support_tverts->size,
+            ];
+        }
+        
+        foreach my $copy (@{ $object->_shifted_copies }) {
+            foreach my $layerm (@{$layer->regions}) {
+                if ($object->step_done(STEP_PERIMETERS)) {
+                    $self->_extrusionentity_to_verts($layerm->perimeters, $top_z, $copy,
+                        $perim_qverts, $perim_tverts);
+                }
+                
+                if ($object->step_done(STEP_INFILL)) {
+                    $self->_extrusionentity_to_verts($layerm->fills, $top_z, $copy,
+                        $infill_qverts, $infill_tverts);
+                }
+            }
+            
+            if ($layer->isa('Slic3r::Layer::Support') && $object->step_done(STEP_SUPPORTMATERIAL)) {
+                $self->_extrusionentity_to_verts($layer->support_fills, $top_z, $copy,
+                    $support_qverts, $support_tverts);
+                
+                $self->_extrusionentity_to_verts($layer->support_interface_fills, $top_z, $copy,
+                    $support_qverts, $support_tverts);
+            }
+        }
+    }
+    
+    my $obb = $object->bounding_box;
+    my $bb = Slic3r::Geometry::BoundingBoxf3->new;
+    foreach my $copy (@{ $object->_shifted_copies }) {
+        my $cbb = $obb->clone;
+        $cbb->translate(@$copy);
+        $bb->merge_point(Slic3r::Pointf3->new_unscale(@{$cbb->min_point}, 0));
+        $bb->merge_point(Slic3r::Pointf3->new_unscale(@{$cbb->max_point}, $object->size->z));
+    }
+    
+    push @{$self->volumes}, Slic3r::GUI::3DScene::Volume->new(
+        bounding_box    => $bb,
+        color           => COLORS->[0],
+        qverts          => $perim_qverts,
+        tverts          => $perim_tverts,
+        offsets         => { %perim_offsets },
+    );
+    
+    push @{$self->volumes}, Slic3r::GUI::3DScene::Volume->new(
+        bounding_box    => $bb,
+        color           => COLORS->[1],
+        qverts          => $infill_qverts,
+        tverts          => $infill_tverts,
+        offsets         => { %infill_offsets },
+    );
+    
+    push @{$self->volumes}, Slic3r::GUI::3DScene::Volume->new(
+        bounding_box    => $bb,
+        color           => COLORS->[2],
+        qverts          => $support_qverts,
+        tverts          => $support_tverts,
+        offsets         => { %support_offsets },
+    );
+}
+
+sub set_toolpaths_range {
+    my ($self, $min_z, $max_z) = @_;
+    
+    foreach my $volume (@{$self->volumes}) {
+        $volume->range([ $min_z, $max_z ]);
+    }
+}
+
+sub _expolygons_to_verts {
+    my ($self, $expolygons, $z, $verts, $norms) = @_;
+    
+    my $tess = gluNewTess();
+    gluTessCallback($tess, GLU_TESS_BEGIN,     'DEFAULT');
+    gluTessCallback($tess, GLU_TESS_END,       'DEFAULT');
+    gluTessCallback($tess, GLU_TESS_VERTEX, sub {
+        my ($x, $y, $z) = @_;
+        push @$verts, $x, $y, $z;
+        push @$norms, (0,0,1), (0,0,1), (0,0,1);
+    });
+    gluTessCallback($tess, GLU_TESS_COMBINE,   'DEFAULT');
+    gluTessCallback($tess, GLU_TESS_ERROR,     'DEFAULT');
+    gluTessCallback($tess, GLU_TESS_EDGE_FLAG, 'DEFAULT');
+    
+    foreach my $expolygon (@$expolygons) {
+        gluTessBeginPolygon($tess);
+        foreach my $polygon (@$expolygon) {
+            gluTessBeginContour($tess);
+            gluTessVertex_p($tess, (map unscale($_), @$_), $z) for @$polygon;
+            gluTessEndContour($tess);
+        }
+        gluTessEndPolygon($tess);
+    }
+    
+    gluDeleteTess($tess);
+}
+
+sub _extrusionentity_to_verts {
+    my ($self, $entity, $top_z, $copy, $qverts, $tverts) = @_;
+    
+    my ($lines, $widths, $heights, $closed);
+    if ($entity->isa('Slic3r::ExtrusionPath::Collection')) {
+        $self->_extrusionentity_to_verts($_, $top_z, $copy, $qverts, $tverts)
+            for @$entity;
+        return;
+    } elsif ($entity->isa('Slic3r::ExtrusionPath')) {
+        my $polyline = $entity->polyline->clone;
+        $polyline->remove_duplicate_points;
+        $polyline->translate(@$copy);
+        $lines = $polyline->lines;
+        $widths = [ map $entity->width, 0..$#$lines ];
+        $heights = [ map $entity->height, 0..$#$lines ];
+        $closed = 0;
+    } else {
+        $lines   = [];
+        $widths  = [];
+        $heights = [];
+        $closed  = 1;
+        foreach my $path (@$entity) {
+            my $polyline = $path->polyline->clone;
+            $polyline->remove_duplicate_points;
+            $polyline->translate(@$copy);
+            my $path_lines = $polyline->lines;
+            push @$lines, @$path_lines;
+            push @$widths, map $path->width, 0..$#$path_lines;
+            push @$heights, map $path->height, 0..$#$path_lines;
+        }
+    }
+    Slic3r::GUI::_3DScene::_extrusionentity_to_verts_do($lines, $widths, $heights,
+        $closed, $top_z, $copy, $qverts, $tverts);
+}
+
+sub object_idx {
+    my ($self, $volume_idx) = @_;
+    return $self->_objects_by_volumes->{$volume_idx}[0];
+}
+
+sub volume_idx {
+    my ($self, $volume_idx) = @_;
+    return $self->_objects_by_volumes->{$volume_idx}[1];
+}
+
+sub instance_idx {
+    my ($self, $volume_idx) = @_;
+    return $self->_objects_by_volumes->{$volume_idx}[2];
 }
 
 1;

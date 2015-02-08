@@ -6,7 +6,7 @@
 
 namespace Slic3r {
 
-Layer::Layer(int id, PrintObject *object, coordf_t height, coordf_t print_z,
+Layer::Layer(size_t id, PrintObject *object, coordf_t height, coordf_t print_z,
         coordf_t slice_z)
 :   _id(id),
     _object(object),
@@ -35,10 +35,16 @@ Layer::~Layer()
     this->clear_regions();
 }
 
-int
-Layer::id()
+size_t
+Layer::id() const
 {
     return this->_id;
+}
+
+void
+Layer::set_id(size_t id)
+{
+    this->_id = id;
 }
 
 PrintObject*
@@ -129,27 +135,25 @@ Layer::any_internal_region_slice_contains(const T &item) const
     }
     return false;
 }
-template bool Layer::any_internal_region_slice_contains<Line>(const Line &item) const;
+template bool Layer::any_internal_region_slice_contains<Polyline>(const Polyline &item) const;
 
 template <class T>
 bool
-Layer::any_internal_region_fill_surface_contains(const T &item) const
+Layer::any_bottom_region_slice_contains(const T &item) const
 {
     FOREACH_LAYERREGION(this, layerm) {
-        if ((*layerm)->fill_surfaces.any_internal_contains(item)) return true;
+        if ((*layerm)->slices.any_bottom_contains(item)) return true;
     }
     return false;
 }
-template bool Layer::any_internal_region_fill_surface_contains<Line>(const Line &item) const;
-template bool Layer::any_internal_region_fill_surface_contains<Polyline>(const Polyline &item) const;
-
+template bool Layer::any_bottom_region_slice_contains<Polyline>(const Polyline &item) const;
 
 #ifdef SLIC3RXS
 REGISTER_CLASS(Layer, "Layer");
 #endif
 
 
-SupportLayer::SupportLayer(int id, PrintObject *object, coordf_t height,
+SupportLayer::SupportLayer(size_t id, PrintObject *object, coordf_t height,
         coordf_t print_z, coordf_t slice_z)
 :   Layer(id, object, height, print_z, slice_z)
 {

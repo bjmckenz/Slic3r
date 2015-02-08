@@ -54,7 +54,7 @@ sub BUILD {
         if $self->config->spiral_vase;
     
     $self->_vibration_limit(Slic3r::GCode::VibrationLimit->new(config => $self->config))
-        if $self->config->vibration_limit > 0;
+        if $self->config->vibration_limit != 0;
     
     $self->_arc_fitting(Slic3r::GCode::ArcFitting->new(config => $self->config))
         if $self->config->gcode_arcs;
@@ -121,23 +121,30 @@ sub export {
     
     # initialize a motion planner for object-to-object travel moves
     if ($self->config->avoid_crossing_perimeters) {
-        my $distance_from_objects = 1;
+        my $distance_from_objects = scale 1;
+        
         # compute the offsetted convex hull for each object and repeat it for each copy.
-        my @islands = ();
-        foreach my $obj_idx (0 .. ($self->print->object_count - 1)) {
+        my @islands_p = ();
+        foreach my $object (@{$self->objects}) {
+            # compute the convex hull of the entire object
             my $convex_hull = convex_hull([
-                map @{$_->contour}, map @{$_->slices}, @{$self->objects->[$obj_idx]->layers},
+                map @{$_->contour}, map @{$_->slices}, @{$object->layers},
             ]);
-            # discard layers only containing thin walls (offset would fail on an empty polygon)
-            if (@$convex_hull) {
-                my $expolygon = Slic3r::ExPolygon->new($convex_hull);
-                my @island = @{$expolygon->offset_ex(scale $distance_from_objects, 1, JT_SQUARE)};
-                foreach my $copy (@{ $self->objects->[$obj_idx]->_shifted_copies }) {
-                    push @islands, map { my $c = $_->clone; $c->translate(@$copy); $c } @island;
-                }
+            
+            # discard objects only containing thin walls (offset would fail on an empty polygon)
+            next if !@$convex_hull;
+            
+            # grow convex hull by the wanted clearance
+            my @obj_islands_p = @{offset([$convex_hull], $distance_from_objects, 1, JT_SQUARE)};
+            
+            # translate convex hull for each object copy and append it to the islands array
+            foreach my $copy (@{ $object->_shifted_copies }) {
+                my @copy_islands_p = map $_->clone, @obj_islands_p;
+                $_->translate(@$copy) for @copy_islands_p;
+                push @islands_p, @copy_islands_p;
             }
         }
-        $gcodegen->avoid_crossing_perimeters->init_external_mp(union_ex([ map @$_, @islands ]));
+        $gcodegen->avoid_crossing_perimeters->init_external_mp(union_ex(\@islands_p));
     }
     
     # calculate wiping points if needed
@@ -162,8 +169,8 @@ sub export {
                 require "Slic3r/SVG.pm";
                 Slic3r::SVG::output(
                     "ooze_prevention.svg",
-                    polygons        => [$outer_skirt],
                     red_polygons    => \@skirts,
+                    polygons        => [$outer_skirt],
                     points          => $gcodegen->ooze_prevention->standby_points,
                 );
             }
@@ -190,7 +197,7 @@ sub export {
                     $gcodegen->set_origin(Slic3r::Pointf->new(map unscale $copy->[$_], X,Y));
                     print $fh $gcodegen->retract;
                     print $fh $gcodegen->travel_to(
-                        $object->_copies_shift->negative,
+                        Slic3r::Point->new(0,0),
                         undef,
                         'move to origin position for next object',
                     );
@@ -208,7 +215,7 @@ sub export {
                     }
                     $self->process_layer($layer, [$copy]);
                 }
-                $self->flush_cooling_buffer;
+                $self->flush_filters;
                 $finished_objects++;
             }
         }
@@ -234,7 +241,7 @@ sub export {
                 }
             }
         }
-        $self->flush_cooling_buffer;
+        $self->flush_filters;
     }
     
     # write end commands to file
@@ -311,9 +318,14 @@ sub process_layer {
     }
     
     # set new layer - this will change Z and force a retraction if retract_layer_change is enabled
+    $gcode .= $self->_gcodegen->placeholder_parser->process($self->print->config->before_layer_gcode, {
+        layer_num => $layer->id,
+        layer_z   => $layer->print_z,
+    }) . "\n" if $self->print->config->before_layer_gcode;
     $gcode .= $self->_gcodegen->change_layer($layer);
     $gcode .= $self->_gcodegen->placeholder_parser->process($self->print->config->layer_gcode, {
         layer_num => $layer->id,
+        layer_z   => $layer->print_z,
     }) . "\n" if $self->print->config->layer_gcode;
     
     # extrude skirt
@@ -354,7 +366,12 @@ sub process_layer {
         }
         $self->_skirt_done->{$layer->print_z} = 1;
         $self->_gcodegen->avoid_crossing_perimeters->use_external_mp(0);
-        $self->_gcodegen->avoid_crossing_perimeters->disable_once(1);
+        
+        # allow a straight travel move to the first object point if this is the first layer
+        # (but don't in next layers)
+        if ($layer->id == 0) {
+            $self->_gcodegen->avoid_crossing_perimeters->disable_once(1);
+        }
     }
     
     # extrude brim
@@ -366,6 +383,8 @@ sub process_layer {
             for @{$self->print->brim};
         $self->_brim_done(1);
         $self->_gcodegen->avoid_crossing_perimeters->use_external_mp(0);
+        
+        # allow a straight travel move to the first object point
         $self->_gcodegen->avoid_crossing_perimeters->disable_once(1);
     }
     
@@ -410,17 +429,19 @@ sub process_layer {
             # process perimeters
             {
                 my $extruder_id = $region->config->perimeter_extruder-1;
-                foreach my $perimeter (@{$layerm->perimeters}) {
+                foreach my $perimeter_coll (@{$layerm->perimeters}) {
+                    next if $perimeter_coll->empty;  # this shouldn't happen but first_point() would fail
+                    
                     # init by_extruder item only if we actually use the extruder
                     $by_extruder{$extruder_id} //= [];
                     
-                    # $perimeter is an ExtrusionLoop or ExtrusionPath object
+                    # $perimeter_coll is an ExtrusionPath::Collection object representing a single slice
                     for my $i (0 .. $#{$layer->slices}) {
                         if ($i == $#{$layer->slices}
-                            || $layer->slices->[$i]->contour->contains_point($perimeter->first_point)) {
+                            || $layer->slices->[$i]->contour->contains_point($perimeter_coll->first_point)) {
                             $by_extruder{$extruder_id}[$i] //= { perimeters => {} };
                             $by_extruder{$extruder_id}[$i]{perimeters}{$region_id} //= [];
-                            push @{ $by_extruder{$extruder_id}[$i]{perimeters}{$region_id} }, $perimeter;
+                            push @{ $by_extruder{$extruder_id}[$i]{perimeters}{$region_id} }, @$perimeter_coll;
                             last;
                         }
                     }
@@ -433,6 +454,8 @@ sub process_layer {
             # throughout the code). We can redefine the order of such Collections but we have to 
             # do each one completely at once.
             foreach my $fill (@{$layerm->fills}) {
+                next if $fill->empty;  # this shouldn't happen but first_point() would fail
+                
                 # init by_extruder item only if we actually use the extruder
                 my $extruder_id = $fill->[0]->is_solid_infill
                     ? $region->config->solid_infill_extruder-1
@@ -529,28 +552,29 @@ sub _extrude_infill {
     return $gcode;
 }
 
-sub flush_cooling_buffer {
+sub flush_filters {
     my ($self) = @_;
-    print {$self->fh} $self->filter($self->_cooling_buffer->flush);
+    
+    print {$self->fh} $self->filter($self->_cooling_buffer->flush, 1);
 }
 
 sub filter {
-    my ($self, $gcode) = @_;
+    my ($self, $gcode, $flush) = @_;
     
     # apply vibration limit if enabled;
     # this injects pauses according to time (thus depends on actual speeds)
     $gcode = $self->_vibration_limit->process($gcode)
-        if $self->print->config->vibration_limit != 0;
+        if defined $self->_vibration_limit;
     
     # apply pressure regulation if enabled;
     # this depends on actual speeds
-    $gcode = $self->_pressure_regulator->process($gcode)
-        if $self->print->config->pressure_advance > 0;
+    $gcode = $self->_pressure_regulator->process($gcode, $flush)
+        if defined $self->_pressure_regulator;
     
     # apply arc fitting if enabled;
     # this does not depend on speeds but changes G1 XY commands into G2/G2 IJ
     $gcode = $self->_arc_fitting->process($gcode)
-        if $self->print->config->gcode_arcs;
+        if defined $self->_arc_fitting;
     
     return $gcode;
 }
