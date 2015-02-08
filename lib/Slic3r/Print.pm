@@ -77,6 +77,8 @@ sub export_gcode {
     
     # prerequisites
     $self->process;
+
+    $self->config->set("load_file","foo");
     
     # output everything to a G-code file
     my $output_file = $self->expanded_output_filepath($params{output_file});

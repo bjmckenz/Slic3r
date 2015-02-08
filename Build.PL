@@ -35,6 +35,7 @@ my %recommends = qw(
 my $sudo    = grep { $_ eq '--sudo' } @ARGV;
 my $gui     = grep { $_ eq '--gui' } @ARGV;
 my $xs_only = grep { $_ eq '--xs' }  @ARGV;
+
 if ($gui) {
     %prereqs = qw(
     Class::Accessor                 0

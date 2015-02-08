@@ -76,6 +76,9 @@ sub export {
 
     print $fh "; $_\n" foreach split /\R/, $self->config->notes;
     print $fh "\n" if $self->config->notes;
+
+    print $fh "; loaded params from $_\n" foreach @{$::opt{load}};
+    print $fh "\n" if @{$::opt{load}};
     
     my $first_object = $self->objects->[0];
     my $layer_height = $first_object->config->layer_height;
